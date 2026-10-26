@@ -1,0 +1,14 @@
+[
+  {
+    "title": "Replace me with a real song",
+    "artist": "Example Artist",
+    "year": 1978,
+    "spotifyUri": "spotify:track:REPLACE_WITH_REAL_TRACK_ID"
+  },
+  {
+    "title": "Another catalog entry",
+    "artist": "Example Artist",
+    "year": 1994,
+    "spotifyUri": "spotify:track:REPLACE_WITH_REAL_TRACK_ID"
+  }
+]

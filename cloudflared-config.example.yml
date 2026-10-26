@@ -1,0 +1,11 @@
+# Example only for a locally-managed Cloudflare Tunnel.
+# If you manage your tunnel in the Cloudflare dashboard, add a Public Hostname
+# there instead and point it at http://127.0.0.1:3000.
+
+tunnel: YOUR-TUNNEL-UUID
+credentials-file: C:\Users\YOUR-WINDOWS-USER\.cloudflared\YOUR-TUNNEL-UUID.json
+
+ingress:
+  - hostname: phipster.tallgin.com
+    service: http://127.0.0.1:3000
+  - service: http_status:404
