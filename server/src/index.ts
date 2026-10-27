@@ -147,11 +147,23 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 io.on("connection", (socket) => {
-  socket.on("room:create", (_payload, ack) => {
+  // A malformed client must not crash every room by omitting its callback.
+  const handle = (event: string, handler: (payload: unknown, ack: (response: unknown) => void) => void) => {
+    socket.on(event, (payload, reply) => handler(payload, typeof reply === "function" ? reply : () => undefined));
+  };
+  const selectRoom = (code: string) => {
+    for (const room of rooms.all()) {
+      if (room.code === code) continue;
+      socket.leave(roomChannel(room.code));
+      if (room.detachSocket(socket.id)) broadcastRoom(room.code);
+    }
+    socket.join(roomChannel(code));
+  };
+  handle("room:create", (_payload, ack) => {
     try {
       const room = rooms.create();
       room.attachHost(room.hostToken, socket.id);
-      socket.join(roomChannel(room.code));
+      selectRoom(room.code);
       ack({ ok: true, data: { code: room.code, hostToken: room.hostToken, state: room.publicState() } });
       broadcastRoom(room.code);
     } catch (error) {
@@ -159,13 +171,13 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("host:attach", (payload, ack) => {
+  handle("host:attach", (payload, ack) => {
     try {
       const parsed = z.object({ code: z.string(), hostToken: z.string() }).parse(payload);
       const room = rooms.get(parsed.code);
       if (!room) throw new Error("Room not found");
       room.attachHost(parsed.hostToken, socket.id);
-      socket.join(roomChannel(room.code));
+      selectRoom(room.code);
       ack({ ok: true, data: { state: room.publicState() } });
       broadcastRoom(room.code);
       emitPrivateTrack(room.code);
@@ -175,7 +187,7 @@ io.on("connection", (socket) => {
   });
 
 
-  socket.on("host:set-song-source", (payload, ack) => {
+  handle("host:set-song-source", (payload, ack) => {
     try {
       const parsed = z.discriminatedUnion("source", [
         z.object({
@@ -205,7 +217,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("player:join", (payload, ack) => {
+  handle("player:join", (payload, ack) => {
     try {
       const parsed = z.object({
         code: z.string(),
@@ -215,7 +227,7 @@ io.on("connection", (socket) => {
       const room = rooms.get(parsed.code);
       if (!room) throw new Error("Room not found");
       const identity = room.joinPlayer(parsed.name, socket.id, parsed.reconnectToken);
-      socket.join(roomChannel(room.code));
+      selectRoom(room.code);
       ack({ ok: true, data: { ...identity, state: room.publicState() } });
       broadcastRoom(room.code);
     } catch (error) {
@@ -223,7 +235,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("game:start", (payload, ack) => {
+  handle("game:start", (payload, ack) => {
     try {
       const parsed = z.object({
         code: z.string(),
@@ -246,7 +258,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("player:start-song", (payload, ack) => {
+  handle("player:start-song", (payload, ack) => {
     try {
       const parsed = z.object({ code: z.string(), playerId: z.string() }).parse(payload);
       const room = rooms.get(parsed.code);
@@ -260,7 +272,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("host:start-song", (payload, ack) => {
+  handle("host:start-song", (payload, ack) => {
     try {
       const parsed = z.object({ code: z.string(), hostToken: z.string() }).parse(payload);
       const room = rooms.get(parsed.code);
@@ -274,7 +286,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("player:preview", (payload, ack) => {
+  handle("player:preview", (payload, ack) => {
     try {
       const parsed = z.object({ code: z.string(), playerId: z.string(), slot: z.number().int() }).parse(payload);
       const room = rooms.get(parsed.code);
@@ -287,7 +299,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("player:guess", (payload, ack) => {
+  handle("player:guess", (payload, ack) => {
     try {
       const parsed = z.object({
         code: z.string(),
@@ -305,7 +317,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("player:skip", (payload, ack) => {
+  handle("player:skip", (payload, ack) => {
     try {
       const parsed = z.object({ code: z.string(), playerId: z.string() }).parse(payload);
       const room = rooms.get(parsed.code);
@@ -318,7 +330,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("player:buy-card", (payload, ack) => {
+  handle("player:buy-card", (payload, ack) => {
     try {
       const parsed = z.object({ code: z.string(), playerId: z.string() }).parse(payload);
       const room = rooms.get(parsed.code);
@@ -331,7 +343,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("player:lock", (payload, ack) => {
+  handle("player:lock", (payload, ack) => {
     try {
       const parsed = z.object({ code: z.string(), playerId: z.string(), slot: z.number().int() }).parse(payload);
       const room = rooms.get(parsed.code);
@@ -344,7 +356,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("player:hitster", (payload, ack) => {
+  handle("player:hitster", (payload, ack) => {
     try {
       const parsed = z.object({ code: z.string(), playerId: z.string(), slot: z.number().int() }).parse(payload);
       const room = rooms.get(parsed.code);
@@ -357,7 +369,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("game:reveal", (payload, ack) => {
+  handle("game:reveal", (payload, ack) => {
     try {
       const parsed = z.object({ code: z.string(), hostToken: z.string() }).parse(payload);
       const room = rooms.get(parsed.code);
@@ -370,7 +382,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("game:next", (payload, ack) => {
+  handle("game:next", (payload, ack) => {
     try {
       const parsed = z.object({ code: z.string(), hostToken: z.string() }).parse(payload);
       const room = rooms.get(parsed.code);
@@ -383,7 +395,20 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("game:restart", (payload, ack) => {
+  handle("game:skip-disconnected", (payload, ack) => {
+    try {
+      const parsed = z.object({ code: z.string(), hostToken: z.string() }).parse(payload);
+      const room = rooms.get(parsed.code);
+      if (!room) throw new Error("Room not found");
+      room.skipDisconnectedPlayer(parsed.hostToken);
+      ack({ ok: true });
+      broadcastRoom(room.code);
+    } catch (error) {
+      ack({ ok: false, error: errorMessage(error, "Could not skip disconnected player") });
+    }
+  });
+
+  handle("game:restart", (payload, ack) => {
     try {
       const parsed = z.object({ code: z.string(), hostToken: z.string() }).parse(payload);
       const room = rooms.get(parsed.code);
@@ -396,7 +421,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("host:request-track", (payload, ack) => {
+  handle("host:request-track", (payload, ack) => {
     try {
       const parsed = z.object({ code: z.string(), hostToken: z.string() }).parse(payload);
       const room = rooms.get(parsed.code);
@@ -411,8 +436,7 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", () => {
     for (const room of rooms.all()) {
-      room.detachSocket(socket.id);
-      broadcastRoom(room.code);
+      if (room.detachSocket(socket.id)) broadcastRoom(room.code);
     }
   });
 });
@@ -430,6 +454,7 @@ setInterval(() => {
 }, 30 * 60 * 1000).unref();
 
 server.listen(port, host, () => {
-  console.log(`Phipster server listening on http://${host}:${port}`);
+  const address = server.address();
+  console.log(`Phipster server listening on http://${host}:${typeof address === "object" && address ? address.port : port}`);
   console.log(`Song catalog: ${songs.count()} tracks`);
 });

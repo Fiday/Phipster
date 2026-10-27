@@ -374,3 +374,5 @@ select:focus { border-color: var(--yellow); box-shadow: 0 0 0 3px rgba(246,207,5
   .source-heading .button-row, .source-apply-row .button { width: 100%; }
   .source-heading .button-row .button { flex: 1; }
 }
+
+.connection-banner { position: sticky; top: 0; z-index: 100; padding: 12px 20px; background: #8c241b; color: white; text-align: center; font-weight: bold; }

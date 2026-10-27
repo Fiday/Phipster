@@ -1,4 +1,5 @@
 import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { ConnectionStatus } from "./components/ConnectionStatus";
 import { Home } from "./pages/Home";
 import { Display } from "./pages/Display";
 import { Join } from "./pages/Join";
@@ -9,6 +10,7 @@ import { Solo } from "./pages/Solo";
 export default function App() {
   return (
     <BrowserRouter>
+      <ConnectionStatus />
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/display" element={<Display />} />

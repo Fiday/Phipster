@@ -15,9 +15,14 @@
     "win:start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows-start.ps1",
     "win:startup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows-register-startup-task.ps1",
     "win:remove-startup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows-unregister-startup-task.ps1",
-    "typecheck": "npm run typecheck -w client && npm run typecheck -w server"
+    "typecheck": "npm run typecheck -w client && npm run typecheck -w server",
+    "test": "npm test -w server && node --test tests/*.test.mjs",
+    "test:e2e": "npm run build -w server && playwright test"
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1"
   }
 }

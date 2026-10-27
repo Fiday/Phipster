@@ -608,3 +608,15 @@ Property 'env' does not exist on type 'ImportMeta'.
 ```
 
 that package was missing `client/src/vite-env.d.ts`. The current package includes the Vite client type declaration and explicit Phipster `VITE_*` environment variable typings.
+
+## Multiplayer reliability checks
+
+The [27 October 2026 bug audit](docs/BUG_AUDIT_2026-10-27.md) records reproduced problems, fixes, and remaining deployment limitations.
+
+- Spotify can be enabled/reconnected from the display during a game, including after refreshing the page. Use **Play song / retry** if the browser blocks autoplay.
+- If the active player disconnects, the host can choose **Skip offline player** to discard that turn without charging a token. Other offline players are skipped when advancing turns; they retain their cards and may reconnect.
+- An exhausted song pool now ends the game explicitly without a winner. A failed skip never charges a token.
+- A connection banner reports network loss. Commands are not buffered while disconnected; a request timeout asks you to check the current state before retrying.
+- Rooms are still held in memory: stop/restart the server only between games.
+
+Run `npm test` for server rules and socket integration checks. For browser regression checks, run `npx playwright install chromium` once, then `npm run test:e2e`. Browser tests mock Spotify, so also check actual audio on your host device before a party.

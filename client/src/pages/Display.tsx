@@ -4,7 +4,7 @@ import { Logo } from "../components/Logo";
 import { LiveTimeline, Timeline, TokenCount } from "../components/Timeline";
 import { MultiplayerPlaylistSetup } from "../components/MultiplayerPlaylistSetup";
 import { useRoomState } from "../hooks/useRoomState";
-import { socket } from "../lib/socket";
+import { socket, emitRequest } from "../lib/socket";
 import { keys } from "../lib/storage";
 import {
   beginSpotifyLogin,
@@ -23,10 +23,11 @@ export function Display() {
   const [tokensEnabled, setTokensEnabled] = useState(true);
   const [gameMode, setGameMode] = useState<GameMode>("individual");
   const [track, setTrack] = useState<PrivateTrack | null>(null);
+  const [spotifyBusy, setSpotifyBusy] = useState(false);
   const [spotifyReady, setSpotifyReady] = useState(false);
   const [spotifyStatus, setSpotifyStatus] = useState(spotifyConnected() ? "Connected; enable player" : "Not connected");
   const playerRef = useRef<phipsterSpotifyPlayer | null>(null);
-  const lastPlayedRound = useRef<number | null>(null);
+  const lastPlayedRound = useRef<string | null>(null);
 
   const joinUrl = useMemo(() => state ? `${window.location.origin}/join/${state.code}` : "", [state]);
   const current = state?.players.find((p) => p.id === state.currentPlayerId) || null;
@@ -35,7 +36,7 @@ export function Display() {
 
   function createRoom() {
     setError("");
-    socket.emit("room:create", {}, (ack: Ack<{ code: string; hostToken: string; state: RoomState }>) => {
+    emitRequest("room:create", {}, (ack: Ack<{ code: string; hostToken: string; state: RoomState }>) => {
       if (!ack.ok) return setError(ack.error);
       setHostToken(ack.data.hostToken);
       setState(ack.data.state);
@@ -49,11 +50,10 @@ export function Display() {
     const code = new URLSearchParams(window.location.search).get("room") || localStorage.getItem(keys.hostRoom);
     const token = localStorage.getItem(keys.hostToken);
     if (!code || !token) return createRoom();
-    socket.emit("host:attach", { code, hostToken: token }, (ack: Ack<{ state: RoomState }>) => {
+    emitRequest("host:attach", { code, hostToken: token }, (ack: Ack<{ state: RoomState }>) => {
       if (!ack.ok) {
-        localStorage.removeItem(keys.hostRoom);
-        localStorage.removeItem(keys.hostToken);
-        return createRoom();
+        setState(null);
+        return setError(ack.error);
       }
       setHostToken(token);
       setState(ack.data.state);
@@ -62,12 +62,8 @@ export function Display() {
   }
 
   useEffect(() => {
-    attachSavedRoom();
-    const onConnect = () => {
-      const code = localStorage.getItem(keys.hostRoom);
-      const token = localStorage.getItem(keys.hostToken);
-      if (code && token) socket.emit("host:attach", { code, hostToken: token }, () => undefined);
-    };
+    if (socket.connected) attachSavedRoom();
+    const onConnect = () => attachSavedRoom();
     socket.on("connect", onConnect);
     return () => { socket.off("connect", onConnect); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -82,27 +78,44 @@ export function Display() {
   useEffect(() => {
     if (!state || !hostToken) return;
     if (state.phase === "waiting") {
-      socket.emit("host:request-track", { code: state.code, hostToken }, () => undefined);
+      emitRequest("host:request-track", { code: state.code, hostToken }, () => undefined);
     }
   }, [state?.round, state?.phase, state?.code, hostToken]);
 
   useEffect(() => {
-    if (!spotifyReady || !track?.spotifyUri || lastPlayedRound.current === track.round || state?.phase !== "waiting") return;
+    if (!spotifyReady || !track?.spotifyUri || track.round !== state?.round || state.phase !== "waiting") return;
+    const playbackKey = `${state.code}:${track.round}:${track.spotifyUri}`;
+    if (lastPlayedRound.current === playbackKey) return;
+    lastPlayedRound.current = playbackKey;
+    let active = true;
     playerRef.current?.playUri(track.spotifyUri)
-      .then(() => {
-        lastPlayedRound.current = track.round;
-        setSpotifyStatus(`Playing round ${track.round}`);
-      })
-      .catch((e) => setSpotifyStatus(e instanceof Error ? e.message : "Could not start Spotify playback"));
-  }, [track, spotifyReady, state?.phase]);
+      .then(() => { if (active) setSpotifyStatus(`Playing round ${track.round}`); })
+      .catch((e) => {
+        if (active) {
+          lastPlayedRound.current = null;
+          setSpotifyStatus(e instanceof Error ? e.message : "Could not start Spotify playback");
+        }
+      });
+    return () => { active = false; };
+  }, [track?.spotifyUri, track?.round, spotifyReady, state?.phase, state?.round, state?.code]);
 
   useEffect(() => {
-    if (state?.phase && state.phase !== "waiting") {
+    if (!state || state.phase !== "waiting") {
       playerRef.current?.pause().catch(() => undefined);
     }
-  }, [state?.phase]);
+    if (state?.phase === "lobby") {
+      lastPlayedRound.current = null;
+      setTrack(null);
+    }
+  }, [state?.phase, state?.code]);
+
+  useEffect(() => () => playerRef.current?.destroy(), []);
 
   async function enableSpotify() {
+    if (spotifyBusy) return;
+    setSpotifyBusy(true);
+    setSpotifyReady(false);
+    lastPlayedRound.current = null;
     try {
       setSpotifyStatus("Starting Spotify player…");
       const player = new phipsterSpotifyPlayer();
@@ -110,16 +123,54 @@ export function Display() {
       playerRef.current = player;
       await player.init(setSpotifyStatus);
       setSpotifyReady(true);
-      setSpotifyStatus("Spotify player ready");
+      setSpotifyStatus("Spotify player ready. If audio is silent, click Play song / retry.");
     } catch (e) {
+      playerRef.current?.destroy();
+      playerRef.current = null;
       setSpotifyStatus(e instanceof Error ? e.message : "Spotify failed to start");
+    } finally {
+      setSpotifyBusy(false);
     }
   }
+
+  async function replaySong() {
+    const player = playerRef.current;
+    if (!player || !track?.spotifyUri || state?.phase !== "waiting" || track.round !== state.round) return;
+    try {
+      // Called directly from a click to satisfy browser autoplay restrictions.
+      await player.activate();
+      await player.playUri(track.spotifyUri);
+      setSpotifyStatus(`Playing round ${track.round}`);
+    } catch (e) {
+      setSpotifyStatus(e instanceof Error ? e.message : "Playback failed; try enabling the player again.");
+    }
+  }
+
+  function disconnectPlayer() {
+    playerRef.current?.destroy();
+    playerRef.current = null;
+    disconnectSpotify();
+    setSpotifyReady(false);
+    setSpotifyStatus("Not connected");
+  }
+
+  const audioControls = (
+    <div className="spotify-box">
+      <strong>Spotify audio</strong>
+      {!spotifyConfigured() ? <p>Add VITE_SPOTIFY_CLIENT_ID and rebuild to enable audio.</p>
+        : spotifyConnected() ? <div className="button-row">
+          <button className="button" disabled={spotifyBusy} onClick={enableSpotify}>{spotifyBusy ? "Starting…" : spotifyReady ? "Reconnect player" : "Enable player"}</button>
+          {state?.phase === "waiting" && <button className="button" disabled={!spotifyReady || !track?.spotifyUri || track.round !== state.round} onClick={replaySong}>Play song / retry</button>}
+          <button className="text-button" onClick={disconnectPlayer}>Disconnect</button>
+        </div> : <button className="button" onClick={() => beginSpotifyLogin(`/display?room=${state?.code || ""}`).catch(e => setSpotifyStatus(String(e)))}>Connect Spotify</button>}
+      <small>{spotifyStatus}</small>
+    </div>
+  );
 
   function startGame() {
     if (!state) return;
     setError("");
-    socket.emit("game:start", { code: state.code, hostToken, winTarget, tokensEnabled, gameMode }, (ack: Ack) => {
+    emitRequest("game:start", { code: state.code, hostToken, winTarget, tokensEnabled, gameMode }, (ack: Ack) => {
       if (!ack.ok) setError(ack.error);
     });
   }
@@ -127,7 +178,7 @@ export function Display() {
   function hostStartSong() {
     if (!state) return;
     setError("");
-    socket.emit("host:start-song", { code: state.code, hostToken }, (ack: Ack) => {
+    emitRequest("host:start-song", { code: state.code, hostToken }, (ack: Ack) => {
       if (!ack.ok) setError(ack.error);
     });
   }
@@ -135,21 +186,21 @@ export function Display() {
   function revealPlacement() {
     if (!state) return;
     setError("");
-    socket.emit("game:reveal", { code: state.code, hostToken }, (ack: Ack) => {
+    emitRequest("game:reveal", { code: state.code, hostToken }, (ack: Ack) => {
       if (!ack.ok) setError(ack.error);
     });
   }
 
   function nextRound() {
     if (!state) return;
-    socket.emit("game:next", { code: state.code, hostToken }, (ack: Ack) => {
+    emitRequest("game:next", { code: state.code, hostToken }, (ack: Ack) => {
       if (!ack.ok) setError(ack.error);
     });
   }
 
   function restart() {
     if (!state) return;
-    socket.emit("game:restart", { code: state.code, hostToken }, (ack: Ack) => {
+    emitRequest("game:restart", { code: state.code, hostToken }, (ack: Ack) => {
       if (!ack.ok) setError(ack.error);
       else {
         lastPlayedRound.current = null;
@@ -159,7 +210,7 @@ export function Display() {
   }
 
   if (!state) {
-    return <main className="center-screen"><Logo large /><p>Creating room…</p>{error && <p className="error">{error}</p>}</main>;
+    return <main className="center-screen"><Logo large /><p>{error ? "Could not restore room" : "Connecting to room…"}</p>{error && <><p className="error">{error}</p><button className="button" onClick={createRoom}>Create new room</button></>}</main>;
   }
 
   if (state.phase === "lobby") {
@@ -192,17 +243,7 @@ export function Display() {
                 <span><strong>FIDSTER tokens</strong><small>2 starting; max 5 · everyone can guess every song</small></span>
                 <input type="checkbox" checked={tokensEnabled} onChange={(e) => setTokensEnabled(e.target.checked)} />
               </label>
-              <div className="spotify-box">
-                <strong>Spotify</strong>
-                {!spotifyConfigured() ? (
-                  <p className="muted">Not configured. Add VITE_SPOTIFY_CLIENT_ID to enable audio.</p>
-                ) : spotifyConnected() ? (
-                  <div className="button-row"><button className="button" onClick={enableSpotify}>{spotifyReady ? "Player ready" : "Enable player"}</button><button className="text-button" onClick={() => { disconnectSpotify(); setSpotifyReady(false); setSpotifyStatus("Not connected"); }}>Disconnect</button></div>
-                ) : (
-                  <button className="button" onClick={() => beginSpotifyLogin(`/display?room=${state.code}`)}>Connect Spotify</button>
-                )}
-                <small>{spotifyStatus}</small>
-              </div>
+              {audioControls}
               <button className="button button--primary button--huge" disabled={state.players.length < 1 || state.songSource.trackCount < minimumTracks} onClick={startGame}>Start game</button>
               <p className="muted tiny">The oldest randomly dealt starter card determines who starts. In Team mode, each connected phone represents one team.</p>
               <p className="muted tiny">Song pool: {state.songSource.trackCount} tracks · {state.songSource.type === "spotify" ? `Spotify · ${state.songSource.name}` : "built-in catalog"}.</p>
@@ -222,8 +263,8 @@ export function Display() {
         <section className="winner-panel">
           <p className="eyebrow">WINNER</p>
           <div className="trophy">★</div>
-          <h1>{winner?.name || "Winner"}</h1>
-          <p>{winner?.timeline.length} songs in the timeline</p>
+          <h1>{winner?.name || "Deck exhausted"}</h1>
+          <p>{winner ? `${winner.timeline.length} songs in the timeline` : state.notice}</p>
           {state.tokensEnabled && winner && <TokenCount count={winner.tokens} />}
           {winner && <Timeline cards={winner.timeline} />}
           <button className="button button--primary" onClick={restart}>Play again</button>
@@ -243,6 +284,11 @@ export function Display() {
         <div className="room-chip">ROOM <strong>{state.code}</strong></div>
       </header>
 
+      {audioControls}
+      {current && !current.connected && (state.phase === "prelisten" || state.phase === "waiting") && <div className="notice-banner">
+        {current.name} is offline. Wait for reconnection or discard this turn.
+        <button className="button" onClick={() => emitRequest("game:skip-disconnected", { code: state.code, hostToken }, (ack: Ack) => { if (!ack.ok) setError(ack.error); })}>Skip offline player</button>
+      </div>}
       <section className={`now-playing ${state.phase === "challenge" ? "now-playing--challenge" : ""}`}>
         {state.phase === "prelisten" ? (
           <>

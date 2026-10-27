@@ -259,3 +259,75 @@ test("playlist source can be switched back to the built-in catalog in the lobby"
     trackCount: repo.count(),
   });
 });
+
+test("an exhausted-deck skip does not charge a token or change the round", () => {
+  const { room, sockets } = setupRoom();
+  const id = room.publicState().currentPlayerId!;
+  room.beginListening(id, sockets.get(id)!);
+  room.deck = [];
+  const before = structuredClone(room.publicState());
+  assert.throws(() => room.skipSong(id, sockets.get(id)!), /deck is empty/i);
+  assert.deepEqual(room.publicState(), before);
+});
+
+test("finishing the last card ends the game without rotating or corrupting the reveal", () => {
+  const { room, repo, sockets } = setupRoom();
+  const id = room.publicState().currentPlayerId!;
+  const active = room.players.find(p => p.id === id)!;
+  room.beginListening(id, sockets.get(id)!);
+  room.lockPlacement(id, sockets.get(id)!, findAutomaticSlot(currentSong(room, repo).year, active.timeline));
+  room.revealChallenges("host-token");
+  room.deck = [];
+  room.next("host-token");
+  assert.equal(room.phase, "gameover");
+  assert.match(room.notice!, /deck.*exhausted/i);
+  assert.equal(room.winnerId, null);
+});
+
+test("duplicate joins from one socket return the same player", () => {
+  const repo = new FakeSongs();
+  const room = new GameRoom(repo as unknown as SongRepository, "TEST", "host-token");
+  const first = room.joinPlayer("Anna", "socket");
+  const second = room.joinPlayer("Anna", "socket");
+  assert.deepEqual(second, first);
+  assert.equal(room.players.length, 1);
+});
+
+test("disconnecting an unrelated socket does not refresh room lifetime", () => {
+  const { room } = setupRoom();
+  room.updatedAt = 1;
+  room.detachSocket("unrelated");
+  assert.equal(room.updatedAt, 1);
+});
+
+test("next turn skips offline players and waits safely if everyone is offline", () => {
+  const { room, repo, sockets } = setupRoom();
+  const id = room.publicState().currentPlayerId!;
+  const other = room.players.find(p => p.id !== id)!;
+  room.beginListening(id, sockets.get(id)!);
+  room.lockPlacement(id, sockets.get(id)!, findAutomaticSlot(currentSong(room, repo).year, room.players[0].timeline));
+  room.revealChallenges("host-token");
+  room.detachSocket(sockets.get(other.id)!);
+  room.next("host-token");
+  assert.equal(room.publicState().currentPlayerId, id);
+  room.beginListening(id, sockets.get(id)!);
+  room.lockPlacement(id, sockets.get(id)!, 0);
+  room.detachSocket(sockets.get(id)!);
+  const before = structuredClone(room.publicState());
+  assert.throws(() => room.next("host-token"), /connected/i);
+  assert.deepEqual(room.publicState(), before);
+});
+
+test("only the host may discard an offline player's unfinished turn", () => {
+  const { room, sockets } = setupRoom();
+  const id = room.publicState().currentPlayerId!;
+  assert.throws(() => room.skipDisconnectedPlayer("host-token"), /still connected/);
+  room.detachSocket(sockets.get(id)!);
+  assert.throws(() => room.skipDisconnectedPlayer("wrong"), /Invalid host token/);
+  room.skipDisconnectedPlayer("host-token");
+  assert.equal(room.phase, "reveal");
+  assert.equal(room.reveal?.outcome, "discarded");
+  assert.equal(room.players.find(p => p.id === id)?.tokens, 2);
+  room.next("host-token");
+  assert.notEqual(room.publicState().currentPlayerId, id);
+});

@@ -150,10 +150,11 @@ export class GameRoom {
   }
 
   private drawSong(): Song {
-    const id = this.deck.pop();
+    const id = this.deck.at(-1);
     if (!id) throw new Error("The song deck is empty. Add more songs or choose a larger Spotify playlist before continuing.");
     const song = this.getSongById(id);
     if (!song) throw new Error("A song in the deck no longer exists");
+    this.deck.pop();
     return song;
   }
 
@@ -267,12 +268,14 @@ export class GameRoom {
 
   private advanceToNextEligiblePlayer(): void {
     if (this.players.length === 0) throw new Error("No players remain");
+    if (!this.players.some(player => player.socketId)) throw new Error("Wait for a player to reconnect; no players are connected.");
     const skippedNames: string[] = [];
     const maxChecks = this.players.length * 3 + 1;
 
     for (let checked = 0; checked < maxChecks; checked += 1) {
       this.currentPlayerIndex = (this.currentPlayerIndex + 1) % this.players.length;
       const candidate = this.currentPlayer();
+      if (!candidate.socketId) continue;
       if (candidate.skipTurns > 0) {
         candidate.skipTurns -= 1;
         skippedNames.push(candidate.name);
@@ -295,17 +298,28 @@ export class GameRoom {
     this.touch();
   }
 
-  detachSocket(socketId: string): void {
-    if (this.hostSocketId === socketId) this.hostSocketId = null;
-    for (const player of this.players) {
-      if (player.socketId === socketId) player.socketId = null;
+  detachSocket(socketId: string): boolean {
+    let changed = false;
+    if (this.hostSocketId === socketId) {
+      this.hostSocketId = null;
+      changed = true;
     }
-    this.touch();
+    for (const player of this.players) {
+      if (player.socketId === socketId) {
+        player.socketId = null;
+        changed = true;
+      }
+    }
+    if (changed) this.touch();
+    return changed;
   }
 
   joinPlayer(name: string, socketId: string, reconnectToken?: string): { playerId: string; reconnectToken: string } {
     const trimmed = name.trim().slice(0, 30);
     if (!trimmed) throw new Error("Enter a player or team name");
+
+    const attached = this.players.find(p => p.socketId === socketId);
+    if (attached) return { playerId: attached.id, reconnectToken: attached.reconnectToken };
 
     if (reconnectToken) {
       const existing = this.players.find((p) => p.reconnectToken === reconnectToken);
@@ -474,8 +488,9 @@ export class GameRoom {
     const player = this.verifiedCurrentPlayer(playerId, socketId);
     if (player.tokens < 1) throw new Error("You need 1 FIDSTER token to skip the song");
 
-    player.tokens -= 1;
+    if (!this.deck.length) throw new Error("The song deck is empty. Finish this song before ending the game.");
     this.startRound(`${player.name} spent 1 token to skip the previous song.`);
+    player.tokens -= 1;
     this.touch();
   }
 
@@ -565,17 +580,33 @@ export class GameRoom {
     if (hostToken !== this.hostToken) throw new Error("Invalid host token");
     if (this.phase !== "reveal") throw new Error("There is no completed round to advance");
 
-    if (this.winnerId) {
+    if (this.winnerId || this.deck.length === 0) {
       this.phase = "gameover";
       this.currentSongId = null;
       this.currentPlacementSlot = null;
       this.challenges = [];
-      this.notice = null;
+      this.notice = this.winnerId ? null : "Song deck exhausted. No player reached the target; start a new game with a larger song pool.";
       this.touch();
       return;
     }
 
     this.advanceToNextEligiblePlayer();
+    this.touch();
+  }
+
+  skipDisconnectedPlayer(hostToken: string): void {
+    if (hostToken !== this.hostToken) throw new Error("Invalid host token");
+    if (this.phase !== "prelisten" && this.phase !== "waiting") throw new Error("This turn cannot be skipped now");
+    const player = this.currentPlayer();
+    if (player.socketId) throw new Error("The active player is still connected");
+    const song = this.currentSong();
+    this.reveal = {
+      song: toTimelineCard(song), playerId: player.id, playerName: player.name,
+      selectedSlot: null, correct: false, outcome: "discarded",
+      challengeWinnerId: null, challengeWinnerName: null, challenges: [], guesses: this.revealGuesses(),
+    };
+    this.phase = "reveal";
+    this.notice = `${player.name} is offline. The host skipped this turn without charging tokens.`;
     this.touch();
   }
 

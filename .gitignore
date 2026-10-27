@@ -8,3 +8,8 @@ data/*.sqlite-wal
 .DS_Store
 
 logs/
+
+*.tsbuildinfo
+test-results/
+playwright-report/
+.test-data/

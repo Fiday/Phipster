@@ -133,6 +133,7 @@ export async function finishSpotifyLogin(search: string): Promise<string> {
   });
   const response = await fetch("https://accounts.spotify.com/api/token", {
     method: "POST",
+    signal: AbortSignal.timeout(15_000),
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
   });
@@ -151,25 +152,38 @@ export async function finishSpotifyLogin(search: string): Promise<string> {
   return returnTo;
 }
 
+let refreshPending: Promise<string> | null = null;
+
 export async function getSpotifyAccessToken(): Promise<string> {
   if (!clientId) throw new Error("Spotify is not configured");
   const tokens = loadTokens();
   if (!tokens) throw new Error("Spotify is not connected");
   if (Date.now() < tokens.expiresAt) return tokens.accessToken;
 
+  if (!refreshPending) {
+    refreshPending = refreshSpotifyTokens(tokens).finally(() => { refreshPending = null; });
+  }
+  return refreshPending;
+}
+
+async function refreshSpotifyTokens(tokens: SpotifyTokens): Promise<string> {
   const body = new URLSearchParams({
-    client_id: clientId,
+    client_id: clientId!,
     grant_type: "refresh_token",
     refresh_token: tokens.refreshToken,
   });
   const response = await fetch("https://accounts.spotify.com/api/token", {
     method: "POST",
+    signal: AbortSignal.timeout(15_000),
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
   });
   if (!response.ok) {
-    disconnectSpotify();
-    throw new Error("Spotify session expired. Connect Spotify again.");
+    if (response.status === 400 || response.status === 401) {
+      disconnectSpotify();
+      throw new Error("Spotify session expired. Connect Spotify again.");
+    }
+    throw new Error(`Spotify token refresh failed (${response.status}). Try again shortly.`);
   }
   const refreshed = await response.json() as { access_token: string; refresh_token?: string; expires_in: number; scope?: string };
   const next = {
@@ -187,6 +201,7 @@ async function spotifyFetch(urlOrPath: string, init: RequestInit = {}): Promise<
   const url = urlOrPath.startsWith("http") ? urlOrPath : `https://api.spotify.com/v1${urlOrPath}`;
   const response = await fetch(url, {
     ...init,
+    signal: init.signal ?? AbortSignal.timeout(15_000),
     headers: {
       Authorization: `Bearer ${token}`,
       ...(init.body ? { "Content-Type": "application/json" } : {}),
@@ -271,7 +286,7 @@ export async function getSpotifyPlaylistTracks(playlistId: string): Promise<Spot
 
     for (const row of page.items) {
       const track = row.item ?? row.track;
-      if (!track || track.type !== "track" || row.is_local || track.is_local || !track.id || !track.uri || seen.has(track.id)) continue;
+      if (!track || track.type !== "track" || row.is_local || track.is_local || track.is_playable === false || !track.id || !track.uri || seen.has(track.id)) continue;
       const year = yearFromReleaseDate(track.album?.release_date);
       if (!year) continue;
       seen.add(track.id);
@@ -300,6 +315,7 @@ type SpotifyTrackObject = {
   type: string;
   uri: string;
   is_local?: boolean;
+  is_playable?: boolean;
   artists?: Array<{ name: string }>;
   external_ids?: { isrc?: string };
   external_urls?: { spotify?: string };
@@ -328,53 +344,104 @@ type SpotifyPlayerInstance = {
   disconnect(): void;
   addListener(event: string, cb: (data: any) => void): boolean;
   togglePlay(): Promise<void>;
+  activateElement(): Promise<void>;
   setVolume(volume: number): Promise<void>;
 };
+
+let sdkLoading: Promise<void> | null = null;
+function loadSpotifySdk(): Promise<void> {
+  if (window.Spotify) return Promise.resolve();
+  if (sdkLoading) return sdkLoading;
+  sdkLoading = new Promise<void>((resolve, reject) => {
+    const script = document.createElement("script");
+    const fail = () => {
+      window.clearTimeout(timeout);
+      script.remove();
+      reject(new Error("Spotify SDK did not load. Check your connection and try again."));
+    };
+    const timeout = window.setTimeout(fail, 15_000);
+    window.onSpotifyWebPlaybackSDKReady = () => {
+      window.clearTimeout(timeout);
+      resolve();
+    };
+    script.src = "https://sdk.scdn.co/spotify-player.js";
+    script.async = true;
+    script.onerror = fail;
+    document.body.appendChild(script);
+  }).catch(error => { sdkLoading = null; throw error; });
+  return sdkLoading;
+}
 
 export class phipsterSpotifyPlayer {
   constructor(private deviceName = "phipster Display") {}
 
   private player: SpotifyPlayerInstance | null = null;
   private deviceId: string | null = null;
+  private destroyed = false;
+  private cancelInit: (() => void) | null = null;
+  private commands: Promise<void> = Promise.resolve();
 
   async init(onStatus: (message: string) => void): Promise<void> {
-    await getSpotifyAccessToken();
-    if (!document.querySelector('script[src="https://sdk.scdn.co/spotify-player.js"]')) {
-      const script = document.createElement("script");
-      script.src = "https://sdk.scdn.co/spotify-player.js";
-      script.async = true;
-      document.body.appendChild(script);
-    }
-
-    await new Promise<void>((resolve, reject) => {
-      const timeout = window.setTimeout(() => reject(new Error("Spotify SDK did not load")), 15_000);
-      const ready = () => {
-        if (!window.Spotify) return;
-        window.clearTimeout(timeout);
-        this.player = new window.Spotify.Player({
-          name: this.deviceName,
-          volume: 0.8,
-          getOAuthToken: (cb) => {
-            getSpotifyAccessToken().then(cb).catch((e) => onStatus(e instanceof Error ? e.message : "Spotify token error"));
-          },
+    try {
+      await getSpotifyAccessToken();
+      await loadSpotifySdk();
+      if (this.destroyed) throw new Error("Spotify player was closed");
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const finish = (error?: Error) => {
+          if (settled) return;
+          settled = true;
+          window.clearTimeout(timeout);
+          this.cancelInit = null;
+          if (error) reject(error); else resolve();
+        };
+        const fail = (message: string) => { onStatus(message); finish(new Error(message)); };
+        const timeout = window.setTimeout(() => fail("Spotify player did not become ready. Try enabling it again."), 15_000);
+        this.cancelInit = () => finish(new Error("Spotify player was closed"));
+        this.player = new window.Spotify!.Player({
+          name: this.deviceName, volume: 0.8,
+          getOAuthToken: cb => { getSpotifyAccessToken().then(cb).catch(e => fail(String(e))); },
         });
         this.player.addListener("ready", ({ device_id }: { device_id: string }) => {
+          if (this.destroyed) return;
           this.deviceId = device_id;
           onStatus("Spotify player ready");
-          resolve();
+          finish();
         });
-        this.player.addListener("not_ready", () => onStatus("Spotify player went offline"));
-        this.player.addListener("initialization_error", ({ message }: { message: string }) => onStatus(message));
-        this.player.addListener("authentication_error", ({ message }: { message: string }) => onStatus(message));
-        this.player.addListener("account_error", ({ message }: { message: string }) => onStatus(message));
+        this.player.addListener("not_ready", () => {
+          this.deviceId = null;
+          onStatus("Spotify player went offline. Reconnect the player to resume audio.");
+        });
+        for (const event of ["initialization_error", "authentication_error", "account_error"]) {
+          this.player.addListener(event, ({ message }: { message: string }) => {
+            this.deviceId = null;
+            fail(message);
+          });
+        }
         this.player.addListener("playback_error", ({ message }: { message: string }) => onStatus(message));
-        this.player.connect().catch(reject);
-      };
-      if (window.Spotify) ready();
-      else window.onSpotifyWebPlaybackSDKReady = ready;
-    });
+        this.player.addListener("autoplay_failed", () => onStatus("Audio was blocked by the browser. Click Play song / retry."));
+        this.player.connect().then(connected => {
+          if (!connected) fail("Spotify could not connect. Try enabling the player again.");
+        }).catch(e => fail(String(e)));
+      });
+      await this.transferHere(false);
+    } catch (error) {
+      this.destroy();
+      throw error;
+    }
+  }
 
-    await this.transferHere(false);
+  activate(): Promise<void> {
+    if (!this.player) return Promise.reject(new Error("Enable the Spotify player first"));
+    return this.player.activateElement();
+  }
+
+  private enqueue(command: () => Promise<void>): Promise<void> {
+    const pending = this.commands.then(() => {
+      if (!this.destroyed) return command();
+    });
+    this.commands = pending.catch(() => undefined);
+    return pending;
   }
 
   private async api(path: string, init: RequestInit) {
@@ -391,15 +458,17 @@ export class phipsterSpotifyPlayer {
 
   async playUri(uri: string) {
     if (!this.deviceId) throw new Error("Spotify player is not ready");
-    await this.api(`/me/player/play?device_id=${encodeURIComponent(this.deviceId)}`, {
+    const deviceId = this.deviceId;
+    await this.enqueue(() => this.api(`/me/player/play?device_id=${encodeURIComponent(deviceId)}`, {
       method: "PUT",
       body: JSON.stringify({ uris: [uri], position_ms: 0 }),
-    });
+    }));
   }
 
   async pause() {
     if (!this.deviceId) return;
-    await this.api(`/me/player/pause?device_id=${encodeURIComponent(this.deviceId)}`, { method: "PUT" });
+    const deviceId = this.deviceId;
+    await this.enqueue(() => this.api(`/me/player/pause?device_id=${encodeURIComponent(deviceId)}`, { method: "PUT" }));
   }
 
   async toggle() {
@@ -407,6 +476,8 @@ export class phipsterSpotifyPlayer {
   }
 
   destroy() {
+    this.destroyed = true;
+    this.cancelInit?.();
     this.player?.disconnect();
     this.player = null;
     this.deviceId = null;

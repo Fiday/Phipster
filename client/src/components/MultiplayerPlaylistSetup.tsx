@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   beginSpotifyLogin,
   getMySpotifyPlaylists,
@@ -15,7 +15,7 @@ import {
   type SoloTrack,
   type YearCheckResult,
 } from "../lib/solo";
-import { socket } from "../lib/socket";
+import { emitRequest } from "../lib/socket";
 import type { Ack, RoomState } from "../types";
 
 type Props = {
@@ -34,6 +34,8 @@ export function MultiplayerPlaylistSetup({ state, hostToken, minimumTracks, onEr
   const [playlists, setPlaylists] = useState<SpotifyPlaylistSummary[]>([]);
   const [playlistsLoading, setPlaylistsLoading] = useState(false);
   const [selectedPlaylist, setSelectedPlaylist] = useState<SpotifyPlaylistSummary | null>(null);
+  const playlistRequest = useRef(0);
+  useEffect(() => () => { playlistRequest.current += 1; }, []);
   const [tracks, setTracks] = useState<SoloTrack[]>([]);
   const [tracksLoading, setTracksLoading] = useState(false);
   const [audits, setAudits] = useState<Record<string, YearCheckResult>>({});
@@ -75,6 +77,9 @@ export function MultiplayerPlaylistSetup({ state, hostToken, minimumTracks, onEr
   }
 
   async function selectPlaylist(playlist: SpotifyPlaylistSummary) {
+    const request = ++playlistRequest.current;
+    setTracks([]);
+    setCheckingIds(new Set());
     setSelectedPlaylist(playlist);
     setTracksLoading(true);
     setAudits({});
@@ -82,6 +87,7 @@ export function MultiplayerPlaylistSetup({ state, hostToken, minimumTracks, onEr
     onError("");
     try {
       const spotifyTracks = await getSpotifyPlaylistTracks(playlist.id);
+      if (request !== playlistRequest.current) return;
       const corrections = loadCorrections(playlist.id);
       setTracks(spotifyTracks.map((track) => ({
         ...track,
@@ -90,10 +96,11 @@ export function MultiplayerPlaylistSetup({ state, hostToken, minimumTracks, onEr
           : undefined,
       })));
     } catch (error) {
+      if (request !== playlistRequest.current) return;
       setTracks([]);
       onError(errorText(error));
     } finally {
-      setTracksLoading(false);
+      if (request === playlistRequest.current) setTracksLoading(false);
     }
   }
 
@@ -125,17 +132,20 @@ export function MultiplayerPlaylistSetup({ state, hostToken, minimumTracks, onEr
   }
 
   async function checkOneTrack(track: SoloTrack) {
+    const request = playlistRequest.current;
     onError("");
     setCheckingIds((current) => new Set(current).add(track.id));
     try {
       const result = await requestYearCheck(track);
+      if (request !== playlistRequest.current) return null;
       setAudits((current) => ({ ...current, [track.id]: result }));
       return result;
     } catch (error) {
+      if (request !== playlistRequest.current) return null;
       onError(errorText(error));
       return null;
     } finally {
-      setCheckingIds((current) => {
+      if (request === playlistRequest.current) setCheckingIds((current) => {
         const next = new Set(current);
         next.delete(track.id);
         return next;
@@ -145,10 +155,12 @@ export function MultiplayerPlaylistSetup({ state, hostToken, minimumTracks, onEr
 
   async function auditAll() {
     if (auditProgress) return;
+    const request = playlistRequest.current;
     setAuditProgress({ done: 0, total: tracks.length });
     let done = 0;
     for (const track of tracks) {
       if (!audits[track.id]) await checkOneTrack(track);
+      if (request !== playlistRequest.current) return;
       done += 1;
       setAuditProgress({ done, total: tracks.length });
     }
@@ -173,7 +185,7 @@ export function MultiplayerPlaylistSetup({ state, hostToken, minimumTracks, onEr
   function useCatalog() {
     onError("");
     setApplying(true);
-    socket.emit("host:set-song-source", {
+    emitRequest("host:set-song-source", {
       source: "catalog",
       code: state.code,
       hostToken,
@@ -188,7 +200,7 @@ export function MultiplayerPlaylistSetup({ state, hostToken, minimumTracks, onEr
     if (!selectedPlaylist || tracks.length < 3) return;
     onError("");
     setApplying(true);
-    socket.emit("host:set-song-source", {
+    emitRequest("host:set-song-source", {
       source: "spotify",
       code: state.code,
       hostToken,

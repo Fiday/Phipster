@@ -58,6 +58,8 @@ export function Solo() {
   const [playlists, setPlaylists] = useState<SpotifyPlaylistSummary[]>([]);
   const [playlistsLoading, setPlaylistsLoading] = useState(false);
   const [selectedPlaylist, setSelectedPlaylist] = useState<SpotifyPlaylistSummary | null>(null);
+  const playlistRequest = useRef(0);
+  useEffect(() => () => { playlistRequest.current += 1; }, []);
   const [tracks, setTracks] = useState<SoloTrack[]>([]);
   const [tracksLoading, setTracksLoading] = useState(false);
   const [audits, setAudits] = useState<Record<string, YearCheckResult>>({});
@@ -116,6 +118,9 @@ export function Solo() {
   }
 
   async function selectPlaylist(playlist: SpotifyPlaylistSummary) {
+    const request = ++playlistRequest.current;
+    setTracks([]);
+    setCheckingIds(new Set());
     setSelectedPlaylist(playlist);
     setTracksLoading(true);
     setError("");
@@ -123,6 +128,7 @@ export function Solo() {
     setAuditProgress(null);
     try {
       const spotifyTracks = await getSpotifyPlaylistTracks(playlist.id);
+      if (request !== playlistRequest.current) return;
       const corrections = loadCorrections(playlist.id);
       const loaded: SoloTrack[] = spotifyTracks.map((track) => ({
         ...track,
@@ -132,10 +138,11 @@ export function Solo() {
       setBestScore(loadBestScore(playlist.id, sessionKey(sessionLength)));
       if (loaded.length < 3) setError("This playlist needs at least 3 playable Spotify tracks with release years.");
     } catch (error) {
+      if (request !== playlistRequest.current) return;
       setTracks([]);
       setError(errorText(error));
     } finally {
-      setTracksLoading(false);
+      if (request === playlistRequest.current) setTracksLoading(false);
     }
   }
 
@@ -167,17 +174,20 @@ export function Solo() {
   }
 
   async function checkOneTrack(track: SoloTrack) {
+    const request = playlistRequest.current;
     setError("");
     setCheckingIds((current) => new Set(current).add(track.id));
     try {
       const result = await requestYearCheck(track);
+      if (request !== playlistRequest.current) return null;
       setAudits((current) => ({ ...current, [track.id]: result }));
       return result;
     } catch (error) {
+      if (request !== playlistRequest.current) return null;
       setError(errorText(error));
       return null;
     } finally {
-      setCheckingIds((current) => {
+      if (request === playlistRequest.current) setCheckingIds((current) => {
         const next = new Set(current);
         next.delete(track.id);
         return next;
@@ -187,11 +197,13 @@ export function Solo() {
 
   async function auditAll() {
     if (auditProgress) return;
+    const request = playlistRequest.current;
     setError("");
     setAuditProgress({ done: 0, total: tracks.length });
     let done = 0;
     for (const track of tracks) {
       if (!audits[track.id]) await checkOneTrack(track);
+      if (request !== playlistRequest.current) return;
       done += 1;
       setAuditProgress({ done, total: tracks.length });
     }
@@ -217,7 +229,13 @@ export function Solo() {
     if (!playerRef.current) {
       const player = new phipsterSpotifyPlayer("phipster Solo");
       playerRef.current = player;
-      await player.init(setSpotifyStatus);
+      try {
+        await player.init(setSpotifyStatus);
+      } catch (error) {
+        player.destroy();
+        playerRef.current = null;
+        throw error;
+      }
     }
     return playerRef.current;
   }
@@ -263,6 +281,7 @@ export function Solo() {
   }
 
   async function replayCurrent() {
+    try { await playerRef.current?.activate(); } catch (error) { setError(errorText(error)); return; }
     if (currentTrack) await play(currentTrack);
   }
 

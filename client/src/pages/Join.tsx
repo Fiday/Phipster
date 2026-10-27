@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { Logo } from "../components/Logo";
 import { LiveTimeline, PlacementTimeline, Timeline, TokenCount } from "../components/Timeline";
 import { useRoomState } from "../hooks/useRoomState";
-import { socket } from "../lib/socket";
+import { socket, emitRequest } from "../lib/socket";
 import { keys } from "../lib/storage";
 import type { Ack, RoomState } from "../types";
 
@@ -15,7 +15,7 @@ export function Join() {
   const [playerId, setPlayerId] = useState<string | null>(
     localStorage.getItem(keys.playerCode) === code ? localStorage.getItem(keys.playerId) : null,
   );
-  const [state, setState] = useRoomState();
+  const [state, setState] = useRoomState(code);
   const [selectedSlot, setSelectedSlot] = useState<number | null>(null);
   const [challengeSlot, setChallengeSlot] = useState<number | null>(null);
   const [guessTitle, setGuessTitle] = useState("");
@@ -36,7 +36,7 @@ export function Join() {
     const reconnectToken = reconnect && localStorage.getItem(keys.playerCode) === code
       ? localStorage.getItem(keys.playerReconnect) || undefined
       : undefined;
-    socket.emit("player:join", { code, name: joinName, reconnectToken }, (ack: Ack<{ playerId: string; reconnectToken: string; state: RoomState }>) => {
+    emitRequest("player:join", { code, name: joinName, reconnectToken }, (ack: Ack<{ playerId: string; reconnectToken: string; state: RoomState }>) => {
       setBusy(false);
       if (!ack.ok) {
         setError(ack.error);
@@ -53,9 +53,11 @@ export function Join() {
   }
 
   useEffect(() => {
+    setState(null);
+    setPlayerId(null);
     const savedName = localStorage.getItem(keys.playerName);
     const savedId = localStorage.getItem(keys.playerId);
-    if (savedName && savedId && localStorage.getItem(keys.playerCode) === code) {
+    if (socket.connected && savedName && savedId && localStorage.getItem(keys.playerCode) === code) {
       joinRoom(savedName, true);
     }
     const onConnect = () => {
@@ -95,7 +97,7 @@ export function Join() {
   function emitSimple(event: string, payload: object) {
     setBusy(true);
     setError("");
-    socket.emit(event, payload, (ack: Ack) => {
+    emitRequest(event, payload, (ack: Ack) => {
       setBusy(false);
       if (!ack.ok) setError(ack.error);
     });
@@ -122,7 +124,7 @@ export function Join() {
     if (!me) return;
     setSelectedSlot(slot);
     setError("");
-    socket.emit("player:preview", { code, playerId: me.id, slot }, (ack: Ack) => {
+    emitRequest("player:preview", { code, playerId: me.id, slot }, (ack: Ack) => {
       if (!ack.ok) setError(ack.error);
     });
   }
@@ -137,7 +139,7 @@ export function Join() {
     if (!me || !guessTitle.trim() || !guessArtist.trim()) return;
     setBusy(true);
     setError("");
-    socket.emit(
+    emitRequest(
       "player:guess",
       { code, playerId: me.id, title: guessTitle.trim(), artist: guessArtist.trim() },
       (ack: Ack<{ correct: boolean; awarded: boolean; tokens: number }>) => {
@@ -160,7 +162,7 @@ export function Join() {
     if (!window.confirm("Spend 1 token and lock this FIDSTER challenge? It cannot be moved afterwards.")) return;
     setBusy(true);
     setError("");
-    socket.emit("player:hitster", { code, playerId: me.id, slot: challengeSlot }, (ack: Ack) => {
+    emitRequest("player:hitster", { code, playerId: me.id, slot: challengeSlot }, (ack: Ack) => {
       setBusy(false);
       if (!ack.ok) setError(ack.error);
       else setChallengeSlot(null);
@@ -233,7 +235,8 @@ export function Join() {
         <Logo />
         <section className="phone-card center-copy">
           <p className="eyebrow">GAME OVER</p>
-          <h1>{winner?.id === me.id ? "You won!" : `${winner?.name || "Someone"} wins!`}</h1>
+          <h1>{winner?.id === me.id ? "You won!" : winner ? `${winner.name} wins!` : "Deck exhausted"}</h1>
+          {state.notice && <p>{state.notice}</p>}
           {state.tokensEnabled && <div className="center-token"><TokenCount count={me.tokens} /></div>}
           <Timeline cards={me.timeline} />
           <p>{me.timeline.length} / {state.winTarget} songs</p>
